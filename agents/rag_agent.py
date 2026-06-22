@@ -6,29 +6,8 @@ Supports classic RAG and agentic RAG (multi-hop, multi-source retrieval).
 
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
-from google.adk.tools.tool_context import ToolContext
-from retrieval import retrieve
+from tools import search_enterprise_knowledge
 from config import RAG_MODEL
-
-
-def search_enterprise_knowledge(query: str, tool_context: ToolContext) -> dict:
-    """Search Bedrock Knowledge Base and return grounded results.
-
-    Args:
-        query: The question or search phrase to retrieve information for.
-
-    Returns:
-        dict: status, results list, and source count.
-    """
-    results = retrieve(query, top_k=5)
-    tool_context.state["last_retrieval_query"]   = query
-    tool_context.state["last_retrieval_results"] = results
-    return {
-        "status":       "success",
-        "results":      results,
-        "result_count": len(results),
-    }
-
 
 rag_agent = LlmAgent(
     name="RAGAgent",
@@ -45,8 +24,9 @@ rag_agent = LlmAgent(
         1. Use search_enterprise_knowledge to retrieve relevant information.
         2. Ground your answer strictly in the retrieved content — do not fabricate information.
         3. Always cite the source document for every claim.
-        4. For complex questions, call the tool multiple times with different queries (agentic RAG).
-        5. If no relevant results are found, say so clearly.
+        4. If the tool returns status "error" or "blocked", report it clearly — do not proceed.
+        5. If no relevant results are found, say so clearly — do not fabricate information.
+        6. For complex questions, call the tool multiple times with different queries (agentic RAG).
 
         Format: answer first, then sources.
     """,

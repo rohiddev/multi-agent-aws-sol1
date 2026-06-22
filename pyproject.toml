@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "enterprise-multi-agent-aws"
+version = "0.1.0"
+description = "Enterprise multi-agent template using Google ADK and Amazon Bedrock"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.8.0",
+    "litellm>=1.40.0",
+    "boto3>=1.34.0",
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp>=1.24.0",
+    "aws-opentelemetry-distro>=0.5.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

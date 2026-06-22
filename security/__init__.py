@@ -1,1 +1,1 @@
-from .aws_security import get_secret, apply_guardrail
+from .aws_security import get_identity, get_secret, apply_guardrail
