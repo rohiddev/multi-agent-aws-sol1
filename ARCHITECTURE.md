@@ -472,3 +472,183 @@ Here is what happens from the moment you type a request to the moment you get an
 | **ECS Fargate** | AWS's serverless container runner — no EC2 instances to manage |
 | **EKS** | AWS's managed Kubernetes service |
 | **PrivateLink** | AWS network feature that keeps traffic to Bedrock inside the AWS network |
+
+---
+
+## Key Design Decisions — Interview Guide
+
+This section explains the important architectural choices made in this system and the reasoning
+behind each one. These are the questions you are most likely to face in a technical interview.
+
+---
+
+### 1. Why use Google ADK on AWS instead of a native AWS agent framework?
+
+**Decision:** Google ADK orchestrates all agents, even though the AI backend is AWS Bedrock.
+
+**Why:**
+ADK provides a production-grade agent loop out of the box — session management, tool
+calling, streaming responses, sub-agent delegation, and a built-in web UI for testing.
+AWS's native agent framework (Bedrock Agents) is tightly coupled to AWS infrastructure
+and harder to test locally. ADK is cloud-agnostic at the orchestration level — it talks
+to any model via LiteLLM. This means the agent logic is portable: the same code can run
+against GCP Gemini or AWS Claude by changing one environment variable.
+
+**Interview angle:** "We separated orchestration (ADK) from inference (Bedrock). This
+gives us cloud portability at the agent layer while still using the best managed AI
+services on each cloud. It is the same principle as using Kubernetes instead of ECS
+for portability."
+
+---
+
+### 2. Why LiteLLM to connect ADK to Bedrock?
+
+**Decision:** LiteLLM translates between ADK's model interface and Bedrock's API.
+
+**Why:**
+ADK natively speaks the Google Gemini API. Bedrock speaks the Anthropic/Amazon API.
+LiteLLM acts as a universal adapter — it exposes a single interface and routes to
+any supported model backend. This means the agent code never changes when switching
+models. A developer can test locally against a cheaper model and deploy against Claude
+Opus in production by changing one string in .env.
+
+**Interview angle:** "LiteLLM is the adapter pattern applied to AI model APIs. It
+decouples the agent logic from the model vendor, which is critical for cost management,
+model upgrades, and avoiding vendor lock-in."
+
+---
+
+### 3. Why a Supervisor + specialist agent pattern instead of one big agent?
+
+**Decision:** One SupervisorAgent routes to three specialist agents (RAG, Action, Policy).
+
+**Why:**
+A single agent given all responsibilities becomes unreliable — the model tries to do
+everything and does nothing well. Separating concerns means:
+- Each agent has a narrow, well-defined prompt — easier to test and tune
+- Each agent can use a different Claude model (e.g. Claude Opus for Policy, Sonnet for RAG)
+- Failures are isolated — a broken Action agent does not affect knowledge retrieval
+- New specialists can be added without touching existing agents
+
+**Interview angle:** "This is the same principle as microservices applied to AI agents —
+separation of concerns, independent deployability, and fault isolation."
+
+---
+
+### 4. Why is PolicyAgent always checked before ActionAgent?
+
+**Decision:** Every write action must pass through PolicyAgent before ActionAgent executes.
+
+**Why:**
+Without a policy gate, the Action agent could create tickets, modify records, or trigger
+workflows for any user regardless of their role. The Policy agent acts as an explicit
+authorisation layer, mirroring how real enterprise systems work (IAM, RBAC). Bedrock
+Guardrails add an automated layer on top — blocking dangerous requests before the model
+even reasons about them.
+
+**Interview angle:** "We applied defence in depth at the agent level. Layer 1 is Bedrock
+Guardrails (automated, real-time content filtering). Layer 2 is the Policy agent (business
+rule enforcement). No action executes without passing both gates."
+
+---
+
+### 5. Why Bedrock Knowledge Bases instead of building a custom RAG pipeline?
+
+**Decision:** Bedrock Knowledge Bases handles ingestion, chunking, embedding, and retrieval.
+
+**Why:**
+Building a custom RAG pipeline requires managing: an embedding model, a vector database,
+a chunking strategy, an ingestion pipeline, and a retrieval API. Bedrock Knowledge Bases
+handles all of this as a managed service. It also integrates natively with S3, SharePoint,
+Confluence, and OneDrive — data sources that enterprises already use. Custom RAG should
+only be chosen when you need non-standard chunking, custom ranking, or a vector DB that
+Bedrock does not support.
+
+**Interview angle:** "Managed RAG eliminates an entire class of operational problems —
+embedding drift, index corruption, ingestion failures. We only build custom infrastructure
+when a managed service genuinely cannot meet the requirement."
+
+---
+
+### 6. Why use Bedrock Guardrails instead of just relying on the Policy agent?
+
+**Decision:** Guardrails run before the model — the Policy agent runs after.
+
+**Why:**
+Bedrock Guardrails operate at the API level, before any model inference happens. They
+block harmful inputs before spending a single token on them. The Policy agent operates
+at the reasoning level — it understands business context and user roles. Together they
+form two independent safety layers. If the Policy agent made a mistake (which LLM-based
+systems can), Guardrails still catch harmful content. This is defence in depth.
+
+**Interview angle:** "Guardrails are the input validation layer. The Policy agent is the
+business logic layer. You always validate at the boundary before applying business rules —
+the same pattern used in web APIs (middleware vs. controller)."
+
+---
+
+### 7. Why is setup_telemetry() called once at module level, not inside run()?
+
+**Decision:** Telemetry is initialised once at startup, not per request.
+
+**Why:**
+If called per request, every invocation of run() would register a new TracerProvider
+and a new logging handler. After 100 requests, there are 100 handlers writing duplicate
+log entries to CloudWatch. In a long-running ECS/EKS service this causes memory growth
+and log flooding. Module-level initialisation is idiomatic for any shared resource.
+
+**Interview angle:** "This is the singleton pattern applied to infrastructure setup.
+The rule is: initialise once, use everywhere. The same principle applies to boto3 clients
+and database connection pools."
+
+---
+
+### 8. Why does credential validation happen at startup, not on the first request?
+
+**Decision:** get_identity() calls AWS STS at module load time before any request is served.
+
+**Why:**
+Failing at startup is far better than failing mid-request. If the IAM role is missing
+or the credentials are wrong, the service should refuse to start and emit a clear error
+rather than serving requests and crashing mid-flow. This pattern also surfaces
+misconfigurations in staging before they reach production users.
+
+**Interview angle:** "In production systems, you want the health check to fail at boot,
+not at runtime. The STS call costs one API call at startup and saves every user from
+hitting a mid-request auth failure."
+
+---
+
+### 9. Why does run() raise RuntimeError instead of returning "No response."?
+
+**Decision:** If no final response event arrives, the function raises an exception.
+
+**Why:**
+Returning a silent fallback string like "No response." hides failures. The caller has
+no way to distinguish between a real agent response and a failure. Raising an exception
+forces the caller to handle it explicitly — log it, retry it, or surface it to the user
+with a proper error message. Silent failures are the hardest bugs to diagnose in a
+distributed system.
+
+**Interview angle:** "This follows the principle of making errors visible. A string that
+looks like a valid response but isn't is a silent failure — the worst kind in any system,
+let alone an AI one where the user cannot see what went wrong."
+
+---
+
+### 10. Why are all tools wrapped in try/except with structured return values?
+
+**Decision:** Every tool returns {"status": "success"|"error"|"blocked"} and never raises.
+
+**Why:**
+If a tool raises an uncaught exception, the ADK agent loop crashes and the user gets
+nothing. By catching all exceptions and returning a structured dict, the agent can
+decide what to do — retry, apologise, or escalate. The "blocked" status is unique to
+the AWS version: it signals that Bedrock Guardrails intercepted the input, which is
+different from an error. This three-state model gives the agent precise information
+to reason about.
+
+**Interview angle:** "Tools are the boundary between the AI layer and real AWS services.
+Boundaries must be hardened. The agent should always receive a signal it can reason
+about — never a raw exception. The three-state return (success/error/blocked) is
+more expressive than a boolean and maps cleanly to HTTP 200/500/403."
